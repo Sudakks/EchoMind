@@ -163,6 +163,8 @@ class IntentRecognizer:
         # 本地字符 n-gram 向量作为轻量兜底，保证三路融合链路真实可跑。
         self._embedding_enabled = not bool(base_url)
 
+        # 用来缓存所有意图模板的向量
+        # intent类别-> 这个category下所有example text的embedding
         self._tpl_embeddings: Dict[IntentCategory, List[List[float]]] = {}
         self._cache: Dict[str, IntentResult] = {}
         self.cache_hits   = 0
@@ -180,6 +182,9 @@ class IntentRecognizer:
 
         history 格式：[{"role": "user"/"assistant", "content": "..."}]
         """
+        # key 是用来在缓存中唯一标识这条消息及其上下文的
+        # 相同消息和相同对话上下文再次进行意图识别时，直接返回之前的识别结果，避免重复调用LLM和计算embedding
+        # 要包含上下文，区分多轮对话语境，不同message在不同语境下会有不同的含义
         key = self._cache_key(message, history)
         if key in self._cache:
             self.cache_hits += 1
@@ -189,9 +194,11 @@ class IntentRecognizer:
         t0 = time.monotonic()
 
         # LLM 和 Embedding 并行（Embedding 不可用时跳过）
+        # LLM 和 Embedding 同时开始，避免串行等待
         llm_task = asyncio.create_task(self._llm_recognize(message, history))
         emb_task = asyncio.create_task(self._embedding_recognize(message)) if self._embedding_enabled else None
-        pat      = self._pattern_recognize(message)
+        # 关键词匹配是本地 CPU 操作，零网络延迟
+        pat = self._pattern_recognize(message)
 
         if emb_task:
             llm, emb = await asyncio.gather(llm_task, emb_task)
@@ -199,7 +206,9 @@ class IntentRecognizer:
             llm = await llm_task
             emb = {"intent": IntentCategory.OTHER, "confidence": 0.0}
 
+        # 三路结果统一成细粒度意图、融合置信度和来源分数
         intent, confidence, source_scores = self._vote(llm, emb, pat)
+        # 使用本地规则提取订单号、金额、错误码等实体，避免额外 LLM 调用
         entities = self._extract_entities(message)
         urgency  = self._urgency(message, intent)
 
@@ -222,10 +231,12 @@ class IntentRecognizer:
         return result
 
     def learn(self, message: str, correct: IntentCategory) -> None:
-        """在线学习：将纠正样本加入模板，清除对应 Embedding 缓存。"""
+        """在线学习：将人工纠正样本加入模板，清除对应 Embedding 缓存。"""
+        # 获取对应类别的模板列表，如果intent存在，那么返回list，否则新建空list
         tpls = _TEMPLATES.setdefault(correct, [])
         if message not in tpls:
             tpls.append(message)
+            # 清楚旧模板向量缓存，如果不删除缓存，新样本不会参与相似度匹配
             self._tpl_embeddings.pop(correct, None)  # 下次重新计算
             logger.info(f"学习新样本 → {correct.value}: {message[:40]}")
 
@@ -295,8 +306,10 @@ class IntentRecognizer:
 
             best_cat, best_score = IntentCategory.OTHER, 0.0
             for cat, vecs in self._tpl_embeddings.items():
+                # 对于每个category，计算该用户msg embedding和该category的每个example embedding
                 score = max(_cosine(msg_vec, v) for v in vecs)
                 if score > best_score:
+                    # 取该类别中最高的相似度
                     best_score, best_cat = score, cat
 
             return {"intent": best_cat, "confidence": best_score}
@@ -329,6 +342,7 @@ class IntentRecognizer:
             IntentCategory.ACCOUNT:    ["密码", "邮箱", "账户", "password"],
         }
 
+        # 直接看msg里有没有字段包含上述的关键词，并且先看specific的细分字段
         best_cat, best_score = self._best_pattern_match(msg, specific_patterns)
         if best_cat != IntentCategory.OTHER:
             return {"intent": best_cat, "confidence": best_score}
@@ -360,6 +374,7 @@ class IntentRecognizer:
         for result, w in weights:
             cat  = result.get("intent", IntentCategory.OTHER)
             conf = result.get("confidence", 0.0)
+            # 对于某个intent，不断累加它从llm，embedding和pattern上得到的confidence
             scores[cat] = scores.get(cat, 0.0) + w * conf
 
         best = max(scores, key=scores.get)  # type: ignore
@@ -395,16 +410,20 @@ class IntentRecognizer:
             return
 
         all_texts = [t for cat in missing for t in _TEMPLATES[cat]]
+        #和之后的text采用同一种embedding方式（不管是远程还是local）
         vecs = [await self._embed_text(text) for text in all_texts]
         idx = 0
         for cat in missing:
             n = len(_TEMPLATES[cat])
+            #将这个类别里的所有文本向量存储到_tpl_embeddings字典中
             self._tpl_embeddings[cat] = vecs[idx: idx + n]
             idx += n
 
     async def _embed_text(self, text: str) -> List[float]:
         """
         生成文本向量。
+
+        统一的向量生成入口，屏蔽了远端和本地两种实现
 
         如果未来接入的官方/兼容客户端提供 embeddings.create，会优先使用远端向量；
         当前 Anthropic SDK 没有该资源时，退化为字符 n-gram 哈希向量。这样不会因为
@@ -413,28 +432,48 @@ class IntentRecognizer:
         embeddings = getattr(self.client, "embeddings", None)
         if embeddings is not None:
             try:
+                #若A客户端有embeddings，调用远端模型生成向量，返回它得到的embedding
                 resp = await embeddings.create(model="voyage-3-lite", input=[text])
                 return list(resp.data[0].embedding)
             except Exception as ex:
                 logger.warning(f"远端 Embedding 失败，使用本地向量兜底: {ex}")
-
+        #若远端失败，使用local embedding
         return self._local_embedding(text)
 
     @staticmethod
     def _local_embedding(text: str, dims: int = 256) -> List[float]:
         """稳定的字符 n-gram 哈希向量，用于无远端 Embedding 时的语义近似匹配。"""
+        #文本标准化
         normalized = text.lower().strip()
+        #初始化向量
         vec = [0.0] * dims
         tokens = set()
+        #生成字符n-gram
+        """
+        1-gram：登、录、失、败
+        2-gram：登录、录失、失败
+        3-gram：登录失、录失败
+
+        用户文本和所有意图模板都会经过同一套向量化逻辑
+
+        用户消息：“登录总是失败”
+        模板文本：“无法登录账号”
+        两者都包含类似字符片段：登陆 失败
+        """
         for n in (1, 2, 3):
             if len(normalized) >= n:
+                #把本轮生成的n-gram加入集合，可以自动去重
                 tokens.update(normalized[i:i + n] for i in range(len(normalized) - n + 1))
         if not tokens:
+            #处理空文本
             tokens.add(normalized)
 
         for token in tokens:
+            #每个 token 经过 MD5 得到稳定的字节序列
             digest = hashlib.md5(token.encode("utf-8")).digest()
+            #前四个字节决定它落入 256 维向量的哪个位置
             idx = int.from_bytes(digest[:4], "big") % dims
+            # 使用正负符号降低哈希碰撞偏差
             sign = 1.0 if digest[4] % 2 == 0 else -1.0
             vec[idx] += sign
         return vec

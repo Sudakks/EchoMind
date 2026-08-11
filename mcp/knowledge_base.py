@@ -9,7 +9,12 @@ RAG 知识库 —— 基于 ChromaDB 的真实检索实现。
 ChromaDB 在这里的角色：
   - memory/ 中用于存储对话记忆（情景记忆 + 用户画像）
   - 这里用于存储知识库文档（RAG 检索）
-  两者是不同的 collection，互不干扰。
+  两者是不同的 collection，互不干扰
+
+ChromaDB是一个embedding database，用于保存文本及其embedding，并根据语义相似度检索内容
+
+文本 -> Embedding 向量 -> 存入 ChromaDB
+用户问题 -> Embedding 向量 -> 相似度搜索 -> 返回相关文本
 """
 import asyncio
 import hashlib

@@ -1,16 +1,16 @@
-# EchoMind 重点代码讲解
+# EchoMind 重点代码讲解\(复制权限已开\)
 
 本文档讲解 EchoMind 中最能体现工程设计的关键代码。内容按实际请求链路组织，而不是按文件顺序罗列。
 
-重要说明：EchoMind 当前代码中已经实现端到端评测链路，核心文件为 `evaluation/evaluator.py`，HTTP 入口为 `api/main.py` 中的 `POST /eval/run`。评测不是简单 mock，而是真实调用 `AgentOrchestrator.run()` 生成回复，再用 LLM-as-Judge 从相关性、准确性、完整性、有用性四个维度评分，并支持意图识别 Accuracy/Macro-F1、回归检测和优化建议。
+重要说明：EchoMind 当前代码中已经实现端到端评测链路，核心文件为 `evaluation/evaluator.py`，HTTP 入口为 `api/main.py` 中的 `POST /eval/run`。评测不是简单 mock，而是真实调用 `AgentOrchestrator.run()` 生成回复，再用 LLM\-as\-Judge 从相关性、准确性、完整性、有用性四个维度评分，并支持意图识别 Accuracy/Macro\-F1、回归检测和优化建议。
 
-## 1. `/chat` 主链路
+## 1\. `/chat` 主链路
 
 **文件**：`api/main.py`
 
 `/chat` 是系统主入口，完整串起记忆读取、意图识别、按意图触发知识库检索、实体注入、Agent 路由、Skills 注入、回复生成和画像更新。
 
-```python
+```Python
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
     if _orchestrator is None or _memory is None:
@@ -65,27 +65,27 @@ async def chat(req: ChatRequest):
 
 ### 关键点
 
-| 步骤 | 作用 |
-|------|------|
-| `get_context()` | 一次性读取工作记忆、情景记忆、用户画像和摘要 |
-| `history` | 只取最近 5 条，控制意图识别 prompt 长度 |
-| `recognize_intent()` | 先识别细粒度意图、意图组、置信度和结构化实体 |
-| `_build_knowledge_context()` | 按意图决定是否调用知识库检索、查询改写、并行召回和重排 |
-| `context=full_context` | 把三级记忆和 Top-K 知识库结果拼成 Agent 可读背景信息 |
-| `entities=intent_result.entities` | 把结构化实体传给 Agent，在 LLM 调用前注入上下文 |
-| `Agent._build_system_prompt()` | 在 LLM 调用前按 Agent 类型和用户消息注入匹配 Skills |
-| `add_message()` | 用户消息和助手回复都写入 Redis 工作记忆 |
-| `update_profile()` | 后台异步提炼用户偏好，不影响接口延迟 |
+|步骤|作用|
+|---|---|
+|`get_context()`|一次性读取工作记忆、情景记忆、用户画像和摘要|
+|`history`|只取最近 5 条，控制意图识别 prompt 长度|
+|`recognize_intent()`|先识别细粒度意图、意图组、置信度和结构化实体|
+|`_build_knowledge_context()`|按意图决定是否调用知识库检索、查询改写、并行召回和重排|
+|`context=full_context`|把三级记忆和 Top\-K 知识库结果拼成 Agent 可读背景信息|
+|`entities=intent_result.entities`|把结构化实体传给 Agent，在 LLM 调用前注入上下文|
+|`Agent._build_system_prompt()`|在 LLM 调用前按 Agent 类型和用户消息注入匹配 Skills|
+|`add_message()`|用户消息和助手回复都写入 Redis 工作记忆|
+|`update_profile()`|后台异步提炼用户偏好，不影响接口延迟|
 
 ---
 
-## 2. 意图识别：三路融合 + 加权投票
+## 2\. 意图识别：三路融合 \+ 加权投票
 
 **文件**：`core/intent_recognizer.py`
 
 ### 主识别流程
 
-```python
+```Python
 async def recognize(self, message: str, history=None) -> IntentResult:
     key = self._cache_key(message, history)
     if key in self._cache:
@@ -112,18 +112,18 @@ async def recognize(self, message: str, history=None) -> IntentResult:
 
 ### 为什么这样写
 
-| 代码 | 设计意义 |
-|------|----------|
-| `asyncio.create_task()` | LLM 和 Embedding 同时开始，避免串行等待 |
-| `pat = self._pattern_recognize()` | 关键词匹配是本地 CPU 操作，零网络延迟 |
-| `asyncio.gather()` | 总耗时接近最慢的那一路，而不是两路相加 |
-| `_vote()` | 三路结果统一成细粒度意图、融合置信度和来源分数 |
-| `_cache_key(message, history)` | 缓存纳入最近对话，避免多轮短句复用错误意图 |
-| `_extract_entities()` | 使用本地规则提取订单号、金额、错误码等实体，避免额外 LLM 调用 |
+|代码|设计意义|
+|---|---|
+|`asyncio.create_task()`|LLM 和 Embedding 同时开始，避免串行等待|
+|`pat = self._pattern_recognize()`|关键词匹配是本地 CPU 操作，零网络延迟|
+|`asyncio.gather()`|总耗时接近最慢的那一路，而不是两路相加|
+|`_vote()`|三路结果统一成细粒度意图、融合置信度和来源分数|
+|`_cache_key(message, history)`|缓存纳入最近对话，避免多轮短句复用错误意图|
+|`_extract_entities()`|使用本地规则提取订单号、金额、错误码等实体，避免额外 LLM 调用|
 
 ### 加权投票
 
-```python
+```Python
 def _vote(self, llm: Dict, emb: Dict, pat: Dict) -> tuple[IntentCategory, float, Dict[str, float]]:
     # 1. 按权重融合 LLM / Embedding / Pattern
     # 2. 如果最终是 billing/technical 等泛意图，但 Pattern 命中 refund、invoice、
@@ -133,16 +133,16 @@ def _vote(self, llm: Dict, emb: Dict, pat: Dict) -> tuple[IntentCategory, float,
 
 权重策略：
 
-| 模式 | 权重 |
-|------|------|
-| 官方 API 模式 | LLM 70% + Embedding 20% + Pattern 10% |
-| 第三方兼容 API 模式 | LLM 85% + Pattern 15%，禁用 Embedding |
+|模式|权重|
+|---|---|
+|官方 API 模式|LLM 70% \+ Embedding 20% \+ Pattern 10%|
+|第三方兼容 API 模式|LLM 85% \+ Pattern 15%，禁用 Embedding|
 
 ### Embedding 兜底
 
 当前 Anthropic SDK 没有 `embeddings` 资源，所以代码做了远端优先、本地兜底：
 
-```python
+```Python
 async def _embed_text(self, text: str) -> List[float]:
     embeddings = getattr(self.client, "embeddings", None)
     if embeddings is not None:
@@ -155,9 +155,9 @@ async def _embed_text(self, text: str) -> List[float]:
     return self._local_embedding(text)
 ```
 
-本地向量是稳定的字符 n-gram 哈希向量：
+本地向量是稳定的字符 n\-gram 哈希向量：
 
-```python
+```Python
 @staticmethod
 def _local_embedding(text: str, dims: int = 256) -> List[float]:
     normalized = text.lower().strip()
@@ -179,13 +179,13 @@ def _local_embedding(text: str, dims: int = 256) -> List[float]:
 
 ---
 
-## 3. MCP 工具调用：缓存、熔断、fallback
+## 3\. MCP 工具调用：缓存、熔断、fallback
 
 **文件**：`mcp/tool_manager.py`
 
 ### 工具调用生命周期
 
-```python
+```Python
 async def call(self, name, params, context=None, *, use_cache=True, rerank_top_k=0):
     tool = self._tools.get(name)
     if not tool:
@@ -217,18 +217,18 @@ async def call(self, name, params, context=None, *, use_cache=True, rerank_top_k
 
 ### 重点设计
 
-| 环节 | 目的 |
-|------|------|
-| 缓存检查 | 相同参数直接返回，降低检索和 LLM 重排成本 |
-| 熔断检查 | 工具连续失败后短期拒绝请求，避免雪崩 |
-| 参数校验 | 使用 JSON Schema 检查 required 和类型 |
-| `asyncio.wait_for` | 工具级超时，避免请求无限挂起 |
-| 统计更新 | 记录成功率、延迟、连续失败，供 Monitor 使用 |
-| fallback | 工具失败时返回可解释降级结果 |
+|环节|目的|
+|---|---|
+|缓存检查|相同参数直接返回，降低检索和 LLM 重排成本|
+|熔断检查|工具连续失败后短期拒绝请求，避免雪崩|
+|参数校验|使用 JSON Schema 检查 required 和类型|
+|`asyncio.wait_for`|工具级超时，避免请求无限挂起|
+|统计更新|记录成功率、延迟、连续失败，供 Monitor 使用|
+|fallback|工具失败时返回可解释降级结果|
 
 ### fallback 实现
 
-```python
+```Python
 async def _fallback_result(self, tool, params, context, error) -> ToolResult:
     if tool.fallback is None:
         return ToolResult(success=False, data=None, tool_name=tool.name, error=error)
@@ -253,7 +253,7 @@ async def _fallback_result(self, tool, params, context, error) -> ToolResult:
 
 在 `api/main.py` 中，知识库工具注册了 fallback：
 
-```python
+```Python
 def knowledge_fallback(params, context, error):
     query = params.get("query", "")
     return [{
@@ -267,11 +267,11 @@ def knowledge_fallback(params, context, error):
 
 ---
 
-## 4. 查询改写 + 并行召回 + LLM 重排
+## 4\. 查询改写 \+ 并行召回 \+ LLM 重排
 
 **文件**：`mcp/tool_manager.py`
 
-```python
+```Python
 async def search_with_rewrite(self, tool_name, query, top_k=5, context=None) -> ToolResult:
     sub_queries = await self.rewrite_query(query, n=3)
 
@@ -302,22 +302,22 @@ async def search_with_rewrite(self, tool_name, query, top_k=5, context=None) -> 
 
 ### 解决的问题
 
-| 问题 | 代码策略 |
-|------|----------|
-| 单 query 召回不全 | `rewrite_query()` 生成多个角度 |
-| 多 query 增加延迟 | `asyncio.gather()` 并行召回 |
-| 重复片段过多 | 内容 MD5 去重 |
-| 向量排序不等于答案质量 | `_rerank()` 使用 LLM 重排 |
+|问题|代码策略|
+|---|---|
+|单 query 召回不全|`rewrite_query()` 生成多个角度|
+|多 query 增加延迟|`asyncio.gather()` 并行召回|
+|重复片段过多|内容 MD5 去重|
+|向量排序不等于答案质量|`_rerank()` 使用 LLM 重排|
 
 ---
 
-## 5. ChromaDB 知识库
+## 5\. ChromaDB 知识库
 
 **文件**：`mcp/knowledge_base.py`
 
 ### 初始化
 
-```python
+```Python
 try:
     self._client = chromadb.HttpClient(host=chroma_host, port=chroma_port)
     self._client.heartbeat()
@@ -339,16 +339,16 @@ if self._collection.count() == 0:
 
 ### 关键点
 
-| 设计 | 作用 |
-|------|------|
-| 优先 `HttpClient` | Docker Compose 下连接独立 ChromaDB 服务 |
-| 失败降级 `PersistentClient` | 本地开发时没有 ChromaDB 服务也能运行 |
-| collection 名称 `knowledge_base` | 和记忆模块的 `episodic`、`user_profile` 隔离 |
-| 空库自动导入默认文档 | 项目启动后可以直接演示检索 |
+|设计|作用|
+|---|---|
+|优先 `HttpClient`|Docker Compose 下连接独立 ChromaDB 服务|
+|失败降级 `PersistentClient`|本地开发时没有 ChromaDB 服务也能运行|
+|collection 名称 `knowledge_base`|和记忆模块的 `episodic`、`user_profile` 隔离|
+|空库自动导入默认文档|项目启动后可以直接演示检索|
 
 ### 检索
 
-```python
+```Python
 results = self._collection.query(
     query_texts=[query],
     n_results=top_k,
@@ -357,7 +357,7 @@ results = self._collection.query(
 
 ChromaDB 会对 `query_texts` 自动生成向量并做语义匹配。返回结果会被转换成：
 
-```python
+```Python
 {
     "title": meta.get("title", ""),
     "content": doc,
@@ -368,13 +368,13 @@ ChromaDB 会对 `query_texts` 自动生成向量并做语义匹配。返回结�
 
 ---
 
-## 6. 三级记忆：Redis + ChromaDB
+## 6\. 三级记忆：Redis \+ ChromaDB
 
 **文件**：`memory/conversation_memory.py`
 
 ### 写入工作记忆
 
-```python
+```Python
 async def add_message(self, user_id, conv_id, role, content, metadata=None):
     key = self._wm_key(user_id, conv_id)
 
@@ -392,13 +392,13 @@ async def add_message(self, user_id, conv_id, role, content, metadata=None):
 
 Redis key：
 
-```text
+```Plaintext
 wm:{user_id}:{conv_id}
 ```
 
 ### 自动压缩
 
-```python
+```Python
 async def _compress(self, user_id, conv_id):
     messages = await self._get_working_memory(user_id, conv_id)
     if len(messages) < self.COMPRESS_AT:
@@ -416,13 +416,13 @@ async def _compress(self, user_id, conv_id):
 
 压缩后的摘要会写入 ChromaDB collection：
 
-```text
+```Plaintext
 episodic
 ```
 
 ### 用户画像
 
-```python
+```Python
 async def update_profile(self, user_id: str, conv_id: str) -> None:
     messages = await self._get_working_memory(user_id, conv_id)
     text = "\n".join(f"{m.role.value}: {m.content}" for m in messages[-10:])
@@ -436,34 +436,34 @@ async def update_profile(self, user_id: str, conv_id: str) -> None:
 
 画像写入 ChromaDB collection：
 
-```text
+```Plaintext
 user_profile
 ```
 
 下一次请求时，`get_context()` 会读取画像并拼入 prompt：
 
-```python
+```Python
 if self.user_profile:
     parts.append(f"[用户画像]\n{json.dumps(self.user_profile, ensure_ascii=True)}")
 ```
 
 ### 三个存储层
 
-| 层级 | 存储 | 内容 |
-|------|------|------|
-| 工作记忆 | Redis | 当前会话最近消息，24h TTL |
-| 情景记忆 | ChromaDB `episodic` | 压缩后的历史对话摘要 |
-| 用户画像 | ChromaDB `user_profile` | 用户偏好和关键实体 |
+|层级|存储|内容|
+|---|---|---|
+|工作记忆|Redis|当前会话最近消息，24h TTL|
+|情景记忆|ChromaDB `episodic`|压缩后的历史对话摘要|
+|用户画像|ChromaDB `user_profile`|用户偏好和关键实体|
 
 ---
 
-## 7. Agent 路由：意图映射、性能路由、降级
+## 7\. Agent 路由：意图映射、性能路由、降级
 
 **文件**：`agents/agent_orchestrator.py`
 
 ### 主流程
 
-```python
+```Python
 async def run(self, req: Request) -> OrchestratorResult:
     if req.intent is None:
         intent_result = await self._intent_recognizer.recognize(req.message, history=req.history)
@@ -486,7 +486,7 @@ async def run(self, req: Request) -> OrchestratorResult:
 
 ### 意图路由
 
-```python
+```Python
 _INTENT_ROUTING = {
     IntentCategory.TECHNICAL:  AgentType.TECHNICAL,
     IntentCategory.TECHNICAL_LOGIN: AgentType.TECHNICAL,
@@ -504,7 +504,7 @@ _INTENT_ROUTING = {
 
 ### 结构化路由决策
 
-```python
+```Python
 def _route_decision(self, req: Request) -> RoutingDecision:
     if req.urgency == UrgencyLevel.CRITICAL:
         return RoutingDecision(primary_agent=AgentType.ESCALATION, ...)
@@ -530,13 +530,13 @@ def _route_decision(self, req: Request) -> RoutingDecision:
 
 示例：
 
-```text
+```Plaintext
 登录报错 401，而且这个月还重复扣款了
 ```
 
 会触发：
 
-```text
+```Plaintext
 primary_agent = technical
 supporting_agents = [billing]
 agent_types = [technical, billing]
@@ -544,7 +544,7 @@ agent_types = [technical, billing]
 
 返回中会包含 `routing_reason`，例如：
 
-```text
+```Plaintext
 intent=technical_login, group=technical, primary=technical, supporting=billing,
 scores=[technical=1.00, billing=0.54, general=0.10]
 ```
@@ -553,7 +553,7 @@ scores=[technical=1.00, billing=0.54, general=0.10]
 
 每个 Agent 执行 LLM 调用前都会构建 system prompt：
 
-```python
+```Python
 def _build_system_prompt(self, req: Request) -> str:
     if self._skill_manager is None:
         return self.system_prompt
@@ -566,26 +566,29 @@ def _build_system_prompt(self, req: Request) -> str:
 这意味着 Skills 不影响意图识别和路由结果，而是在“选定 Agent 后、调用 LLM 前”生效。这样可以保证：
 
 - `GeneralAgent` 只注入通用客服接待规范。
+
 - `TechnicalAgent` 只注入技术支持处理规范。
+
 - `BillingAgent` 只注入账单退款处理规范。
+
 - 复合问题并行时，技术和账单两个 Agent 会分别注入各自的 Skills。
 
 以 `GeneralAgent` 为例，它继承 `BaseAgent`，并声明：
 
-```python
+```Python
 class GeneralAgent(BaseAgent):
     agent_type = AgentType.GENERAL
 ```
 
 所以执行 `_build_system_prompt()` 时传给 `SkillManager` 的第二个参数是：
 
-```python
+```Python
 self.agent_type.value  # "general"
 ```
 
 对应调用链是：
 
-```text
+```Plaintext
 GeneralAgent.handle(req)
   -> BaseAgent._call_llm(req)
   -> BaseAgent._build_system_prompt(req)
@@ -595,7 +598,7 @@ GeneralAgent.handle(req)
 
 `skills/general_customer_service/SKILL.md` 顶部配置了：
 
-```yaml
+```YAML
 agents: general
 keywords: 你好,您好,咨询,帮助,客服,订单,售后,活动,会员,账户,资料,投诉,建议,人工,转人工,处理进度,服务
 enabled: true
@@ -605,7 +608,7 @@ enabled: true
 
 ### 性能路由
 
-```python
+```Python
 def _best_agent(self, agent_type: AgentType) -> Optional[BaseAgent]:
     agents = self._pool.get(agent_type, [])
     if not agents:
@@ -615,13 +618,13 @@ def _best_agent(self, agent_type: AgentType) -> Optional[BaseAgent]:
 
 ---
 
-## 8. 动态 Skills 加载与热更新
+## 8\. 动态 Skills 加载与热更新
 
 **文件**：`core/skill_loader.py`、`api/main.py`、`agents/agent_orchestrator.py`
 
 ### Skill 数据结构
 
-```python
+```Python
 @dataclass
 class Skill:
     name: str
@@ -637,7 +640,7 @@ class Skill:
 
 ### 匹配逻辑
 
-```python
+```Python
 def matches(self, message: str, agent_type: Optional[str] = None) -> bool:
     if not self.enabled:
         return False
@@ -651,18 +654,18 @@ def matches(self, message: str, agent_type: Optional[str] = None) -> bool:
 
 关键点：
 
-| 条件 | 行为 |
-|------|------|
-| `enabled=false` | 不注入 |
-| `agents` 不包含当前 Agent | 不注入 |
-| `keywords` 为空 | 作为该 Agent 的全局规则 |
-| `keywords` 命中用户消息 | 注入到 system prompt |
+|条件|行为|
+|---|---|
+|`enabled=false`|不注入|
+|`agents` 不包含当前 Agent|不注入|
+|`keywords` 为空|作为该 Agent 的全局规则|
+|`keywords` 命中用户消息|注入到 system prompt|
 
-### prompt_for 的完整筛选过程
+### prompt\_for 的完整筛选过程
 
 `SkillManager.prompt_for()` 会遍历已加载的所有 Skill，并调用 `matches()` 判断是否适用于当前请求：
 
-```python
+```Python
 for skill in self._skills:
     if not skill.matches(message, agent_type):
         continue
@@ -673,7 +676,7 @@ for skill in self._skills:
 
 筛选顺序可以理解为：
 
-```text
+```Plaintext
 1. Skill 是否启用
 2. Skill 的 agents 是否包含当前 Agent 类型
 3. Skill 的 keywords 是否命中用户消息
@@ -685,7 +688,7 @@ for skill in self._skills:
 
 ### 目录扫描
 
-```python
+```Python
 def _discover_files(self, root_dir: Path) -> Iterable[Path]:
     skill_md_files = sorted(root_dir.rglob("SKILL.md"))
     ...
@@ -696,7 +699,7 @@ def _discover_files(self, root_dir: Path) -> Iterable[Path]:
 
 支持两种结构：
 
-```text
+```Plaintext
 skills/technical_support/SKILL.md
 skills/billing_support.json
 ```
@@ -705,7 +708,7 @@ skills/billing_support.json
 
 `api/main.py` 在 lifespan 中加载 Skills：
 
-```python
+```Python
 skills_dir = os.getenv("ECHOMIND_SKILLS_DIR", str(pathlib.Path(_ROOT) / "skills"))
 _skill_manager = SkillManager(
     root_dir=skills_dir,
@@ -720,7 +723,7 @@ CLI 模式也使用同一套加载逻辑，避免 HTTP 和 CLI 行为不一致�
 
 ### 热加载接口
 
-```python
+```Python
 @app.post("/skills/reload", tags=["Skills"])
 async def reload_skills():
     _skill_manager.reload()
@@ -733,13 +736,13 @@ async def reload_skills():
 
 ---
 
-## 9. routing_score 与 Monitor 降权
+## 9\. routing\_score 与 Monitor 降权
 
 **文件**：`agents/agent_orchestrator.py`、`monitor/performance_monitor.py`
 
 ### AgentStats
 
-```python
+```Python
 @dataclass
 class AgentStats:
     total: int = 0
@@ -755,7 +758,7 @@ class AgentStats:
 
 ### Monitor 采集并写回 penalty
 
-```python
+```Python
 async def _collect(self) -> None:
     agent_stats = self._orchestrator.get_stats()
     tool_stats = self._tool_manager.get_stats()
@@ -774,7 +777,7 @@ async def _collect(self) -> None:
 
 ### 降权规则
 
-```python
+```Python
 @staticmethod
 def _routing_penalty(success_rate: float, avg_ms: float) -> float:
     penalty = 0.0
@@ -787,7 +790,7 @@ def _routing_penalty(success_rate: float, avg_ms: float) -> float:
 
 ### 写回 Orchestrator
 
-```python
+```Python
 def update_routing_penalties(self, penalties: Dict[str, float]) -> None:
     for agent_type, agents in self._pool.items():
         for i, agent in enumerate(agents):
@@ -800,13 +803,13 @@ def update_routing_penalties(self, penalties: Dict[str, float]) -> None:
 
 ---
 
-## 10. LLM-as-Judge 端到端评测
+## 10\. LLM\-as\-Judge 端到端评测
 
 **文件**：`evaluation/evaluator.py`
 
 ### 真实调用 Orchestrator
 
-```python
+```Python
 orch_req = OrcReq(
     message=question,
     user_id=user_id,
@@ -822,7 +825,7 @@ actual_answer = orch_result.response
 
 ### 四维度评分
 
-```python
+```Python
 return QualityScores(
     relevance=float(data.get("relevance", 0.5)),
     accuracy=float(data.get("accuracy", 0.5)),
@@ -831,16 +834,16 @@ return QualityScores(
 )
 ```
 
-| 维度 | 含义 |
-|------|------|
-| `relevance` | 是否直接回应用户问题 |
-| `accuracy` | 信息是否准确 |
-| `completeness` | 是否完整解决需求 |
-| `helpfulness` | 用户能否据此行动 |
+|维度|含义|
+|---|---|
+|`relevance`|是否直接回应用户问题|
+|`accuracy`|信息是否准确|
+|`completeness`|是否完整解决需求|
+|`helpfulness`|用户能否据此行动|
 
 ### 回归检测
 
-```python
+```Python
 def _detect_regressions(self, current: Dict[str, float]) -> List[str]:
     prev_report = self._history[-1] if self._history else self._baseline
     if prev_report is None:
@@ -861,11 +864,11 @@ def _detect_regressions(self, current: Dict[str, float]) -> List[str]:
 
 ---
 
-## 11. Unicode 安全处理
+## 11\. Unicode 安全处理
 
 **文件**：`agents/agent_orchestrator.py`
 
-```python
+```Python
 async def _call_llm(self, req: Request) -> str:
     def _clean(s: str) -> str:
         return s.encode("utf-8", errors="ignore").decode("utf-8")
@@ -877,17 +880,17 @@ async def _call_llm(self, req: Request) -> str:
     messages.append({"role": "user", "content": _clean(req.message)})
 ```
 
-ChromaDB 或 Redis 中可能存储包含 Unicode 代理字符的数据。`_clean()` 会在调用 LLM 前移除无法 UTF-8 编码的字符，避免 API 请求崩溃。
+ChromaDB 或 Redis 中可能存储包含 Unicode 代理字符的数据。`_clean()` 会在调用 LLM 前移除无法 UTF\-8 编码的字符，避免 API 请求崩溃。
 
 ---
 
-## 12. 环境自适应：官方 API 与第三方兼容 API
+## 12\. 环境自适应：官方 API 与第三方兼容 API
 
 **文件**：`core/intent_recognizer.py`、`api/main.py`
 
 配置读取：
 
-```python
+```Python
 def _anthropic_cfg() -> Dict[str, Any]:
     key = os.getenv("ANTHROPIC_API_KEY", "")
     if not key:
@@ -904,13 +907,14 @@ def _anthropic_cfg() -> Dict[str, Any]:
 
 意图识别中根据 `base_url` 自动切换策略：
 
-```python
+```Python
 self._embedding_enabled = not bool(base_url)
 ```
 
-| 模式 | 条件 | 行为 |
-|------|------|------|
-| 官方 Anthropic | `ANTHROPIC_BASE_URL` 为空 | 三路融合：LLM + Embedding + Pattern |
-| 第三方兼容 API | `ANTHROPIC_BASE_URL` 有值 | 两路融合：LLM + Pattern |
+|模式|条件|行为|
+|---|---|---|
+|官方 Anthropic|`ANTHROPIC_BASE_URL` 为空|三路融合：LLM \+ Embedding \+ Pattern|
+|第三方兼容 API|`ANTHROPIC_BASE_URL` 有值|两路融合：LLM \+ Pattern|
 
 调用层不需要关心差异，只需要通过环境变量切换。
+

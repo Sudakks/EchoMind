@@ -117,6 +117,7 @@ class Tool:
     cache_ttl:   float = 0.0                 # 0 = 不缓存
     timeout_s:   float = 30.0
     supports_rerank: bool = False            # 是否支持结果重排
+    # 出错后如何降级
     fallback:    Optional[Callable] = None    # sync/async (params, context, error) -> Any
 
     # 运行时状态（不参与构造）
@@ -140,7 +141,9 @@ class MCPToolManager:
             kwargs["base_url"] = base_url
         self._client = AsyncAnthropic(**kwargs)
         self._model  = model
+        #保存注册过的工具
         self._tools: Dict[str, Tool] = {}
+        #保存工具调用结果
         self._cache: Dict[str, tuple] = {}   # key → (result, expire_at, reranked)
 
     # ── 注册 / 注销 ───────────────────────────────────────────────────────────

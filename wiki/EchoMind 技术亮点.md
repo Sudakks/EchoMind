@@ -1,24 +1,24 @@
-# EchoMind 技术亮点详解
+# EchoMind 技术亮点
 
 本文档说明 EchoMind 当前实现中的七大核心技术亮点。每个亮点都对应真实代码模块，并能通过 API 或 Docker 环境观察到效果。
 
-特别强调：端到端评测是 EchoMind 当前已经实现的核心能力之一，不是后续规划。系统通过 `POST /eval/run` 支持内置用例和自定义用例评测，覆盖意图识别 Accuracy/Macro-F1、真实 Agent 回复质量、LLM-as-Judge 四维评分、回归检测和优化建议生成。也就是说，EchoMind 的技术亮点不仅包括“会回答”，还包括“能自动评估回答质量并发现退化”。
+特别强调：端到端评测是 EchoMind 当前已经实现的核心能力之一，不是后续规划。系统通过 `POST /eval/run` 支持内置用例和自定义用例评测，覆盖意图识别 Accuracy/Macro\-F1、真实 Agent 回复质量、LLM\-as\-Judge 四维评分、回归检测和优化建议生成。也就是说，EchoMind 的技术亮点不仅包括“会回答”，还包括“能自动评估回答质量并发现退化”。
 
 当前版本重点实现：
 
-| 能力 | 关键代码 | 可观察入口 |
-|------|----------|------------|
-| 三路融合意图识别 | `core/intent_recognizer.py` | `/chat` 响应中的 `intent` |
-| 查询改写 + 重排 + fallback | `mcp/tool_manager.py`、`mcp/knowledge_base.py` | `/chat`、`/search`、`/knowledge/*` |
-| Redis + ChromaDB 三级记忆 | `memory/conversation_memory.py` | 多轮 `/chat`、Docker 中查看 ChromaDB |
-| 多 Agent 路由和自动并行协作 | `agents/agent_orchestrator.py` | `/chat` 响应中的 `agent_type` |
-| 动态 Skills 加载与注入 | `core/skill_loader.py`、`skills/*/SKILL.md` | `/skills`、`/skills/reload` |
-| Monitor 自动降权闭环 | `monitor/performance_monitor.py` | `/monitor` |
-| 端到端评测 | `evaluation/evaluator.py` | `/eval/run` |
+|能力|关键代码|可观察入口|
+|---|---|---|
+|三路融合意图识别|`core/intent_recognizer.py`|`/chat` 响应中的 `intent`|
+|查询改写 \+ 重排 \+ fallback|`mcp/tool_manager.py`、`mcp/knowledge_base.py`|`/chat`、`/search`、`/knowledge/*`|
+|Redis \+ ChromaDB 三级记忆|`memory/conversation_memory.py`|多轮 `/chat`、Docker 中查看 ChromaDB|
+|多 Agent 路由和自动并行协作|`agents/agent_orchestrator.py`|`/chat` 响应中的 `agent_type`|
+|动态 Skills 加载与注入|`core/skill_loader.py`、`skills/*/SKILL.md`|`/skills`、`/skills/reload`|
+|Monitor 自动降权闭环|`monitor/performance_monitor.py`|`/monitor`|
+|端到端评测|`evaluation/evaluator.py`|`/eval/run`|
 
 ## 总体架构
 
-```text
+```Plaintext
 用户请求
   -> api/main.py
   -> MemoryManager 读取上下文
@@ -44,7 +44,7 @@
 
 ### 技术方案
 
-```text
+```Plaintext
 用户消息 + 最近对话历史
     ├── LLM 语义理解
     │   - Few-shot 示例
@@ -68,48 +68,55 @@
 
 ### 权重策略
 
-| 场景 | LLM | Embedding | Pattern |
-|------|-----|-----------|---------|
-| 官方 API 模式 | 70% | 20% | 10% |
-| 第三方兼容 API 模式 | 85% | 禁用 | 15% |
+|场景|LLM|Embedding|Pattern|
+|---|---|---|---|
+|官方 API 模式|70%|20%|10%|
+|第三方兼容 API 模式|85%|禁用|15%|
 
 ### 工程细节
 
 - **并行执行**：LLM 识别和 Embedding 识别通过 `asyncio.gather` 并行执行，关键词匹配同步完成。
-- **Embedding 兜底**：如果客户端未来提供 `embeddings.create`，优先使用远端向量；当前 Anthropic SDK 没有该资源时，自动使用稳定的本地字符 n-gram 哈希向量。
+
+- **Embedding 兜底**：如果客户端未来提供 `embeddings.create`，优先使用远端向量；当前 Anthropic SDK 没有该资源时，自动使用稳定的本地字符 n\-gram 哈希向量。
+
 - **细粒度优先**：退款、发票、支付异常、登录故障、崩溃报错等场景优先返回细粒度意图，再归一化为上层意图组。
+
 - **低置信度保护**：投票得分低于阈值时降级为 `OTHER`，编排层会先追问澄清，减少错误路由。
+
 - **实体提取**：使用本地规则提取 `order_id`、`date`、`amount`、`error_code` 等实体，避免每次额外调用 LLM。
+
 - **来源分数**：返回 LLM、Embedding、Pattern 的识别分数，便于调试和评测。
+
 - **紧急度识别**：根据 “紧急”“马上”“今天”“转人工”等关键词计算 `LOW/MEDIUM/HIGH/CRITICAL`。
+
 - **在线学习**：`learn()` 可以把人工纠正样本加入模板，并清除对应 Embedding 缓存。
 
 ### 支持的意图
 
-| 意图 | 说明 | 示例 |
-|------|------|------|
-| `query` | 查询信息 | “我的订单什么时候到？” |
-| `complaint` | 投诉不满 | “你们服务太差了！” |
-| `request` | 请求操作 | “帮我取消订单” |
-| `technical` | 技术问题 | “应用一直报 500 错误” |
-| `billing` | 账单/退款 | “为什么扣了两次款？” |
-| `account` | 账户管理 | “修改我的邮箱地址” |
-| `escalation` | 升级/转人工 | “我要投诉，转人工！” |
-| `greeting` | 问候 | “你好” |
-| `feedback` | 正面反馈 | “服务很棒” |
-| `logistics` | 物流配送 | “快递什么时候到？” |
-| `order_status` | 订单状态 | “订单处理到哪一步了？” |
-| `refund` | 退款/退货 | “退款多久到账？” |
-| `invoice` | 发票 | “帮我开发票” |
-| `payment_issue` | 支付异常 | “为什么重复扣款？” |
-| `account_security` | 账户安全 | “账户被盗了” |
-| `technical_login` | 登录故障 | “登录一直报 401” |
-| `technical_crash` | 崩溃报错 | “应用一直崩溃” |
-| `human_handoff` | 转人工 | “我要找人工客服” |
+|意图|说明|示例|
+|---|---|---|
+|`query`|查询信息|“我的订单什么时候到？”|
+|`complaint`|投诉不满|“你们服务太差了！”|
+|`request`|请求操作|“帮我取消订单”|
+|`technical`|技术问题|“应用一直报 500 错误”|
+|`billing`|账单/退款|“为什么扣了两次款？”|
+|`account`|账户管理|“修改我的邮箱地址”|
+|`escalation`|升级/转人工|“我要投诉，转人工！”|
+|`greeting`|问候|“你好”|
+|`feedback`|正面反馈|“服务很棒”|
+|`logistics`|物流配送|“快递什么时候到？”|
+|`order_status`|订单状态|“订单处理到哪一步了？”|
+|`refund`|退款/退货|“退款多久到账？”|
+|`invoice`|发票|“帮我开发票”|
+|`payment_issue`|支付异常|“为什么重复扣款？”|
+|`account_security`|账户安全|“账户被盗了”|
+|`technical_login`|登录故障|“登录一直报 401”|
+|`technical_crash`|崩溃报错|“应用一直崩溃”|
+|`human_handoff`|转人工|“我要找人工客服”|
 
 ---
 
-## 亮点二：MCP 工具调用框架 + RAG 知识库
+## 亮点二：MCP 工具调用框架 \+ RAG 知识库
 
 **文件**：`mcp/tool_manager.py`、`mcp/knowledge_base.py`
 
@@ -117,7 +124,7 @@
 
 ### 检索优化链路
 
-```text
+```Plaintext
 用户查询：“退款需要多久”
     ↓
 1. LLM 查询改写
@@ -142,23 +149,27 @@
 
 `KnowledgeBase` 使用 ChromaDB collection：
 
-```text
+```Plaintext
 knowledge_base
 ```
 
 能力包括：
 
 - 启动时自动导入默认客服文档。
+
 - `/knowledge/add` 批量导入文档。
+
 - `/knowledge/upload` 上传 `.txt`、`.md`、`.json` 文档。
+
 - 长文档自动切片，每片约 500 字。
+
 - 查询时使用 ChromaDB 的 `query_texts` 做语义检索。
 
 ### 工具可靠性
 
 `MCPToolManager.call()` 统一封装工具调用生命周期：
 
-```text
+```Plaintext
 缓存检查
   -> 熔断检查
   -> 参数校验
@@ -171,20 +182,20 @@ knowledge_base
 
 可靠性设计：
 
-| 机制 | 作用 |
-|------|------|
-| JSON Schema 参数校验 | 阻止错误参数进入工具 handler |
-| TTL 缓存 | 相同参数复用结果，降低重复调用成本 |
-| Circuit Breaker | 连续失败达到阈值后打开熔断，恢复窗口后半开探测 |
-| Timeout | 工具级超时，避免单个工具拖垮请求 |
-| Fallback | 工具不可用时返回可解释降级结果 |
-| ToolStats | 记录成功率、延迟、连续失败次数，供 Monitor 使用 |
+|机制|作用|
+|---|---|
+|JSON Schema 参数校验|阻止错误参数进入工具 handler|
+|TTL 缓存|相同参数复用结果，降低重复调用成本|
+|Circuit Breaker|连续失败达到阈值后打开熔断，恢复窗口后半开探测|
+|Timeout|工具级超时，避免单个工具拖垮请求|
+|Fallback|工具不可用时返回可解释降级结果|
+|ToolStats|记录成功率、延迟、连续失败次数，供 Monitor 使用|
 
 ### 当前知识库 fallback
 
 `api/main.py` 注册 `knowledge_search` 工具时配置了 fallback。当 ChromaDB 不可用或工具异常时，不会直接返回空错误，而是返回类似：
 
-```json
+```JSON
 {
   "title": "知识库降级结果",
   "content": "知识库暂时不可用，未能完成语义检索。请稍后重试，或转人工客服确认。",
@@ -196,13 +207,13 @@ knowledge_base
 
 当前 `/chat` 不再只依赖 LLM 和对话记忆。主对话接口会先识别意图，再判断该意图是否需要知识库。业务类意图会在 Agent 执行前调用：
 
-```text
+```Plaintext
 MCPToolManager.search_with_rewrite("knowledge_search", 用户消息, top_k=3)
 ```
 
-然后把 Top-K 结果拼入 Agent 上下文：
+然后把 Top\-K 结果拼入 Agent 上下文：
 
-```text
+```Plaintext
 [知识库检索结果]
 1. 标题: 退款政策
    相关度: 0.82
@@ -213,13 +224,13 @@ MCPToolManager.search_with_rewrite("knowledge_search", 用户消息, top_k=3)
 
 业务收益：
 
-| 收益 | 说明 |
-|------|------|
-| 降低幻觉 | Agent 回复受知识库政策约束 |
-| 知识可更新 | 通过 `/knowledge/add` 或 `/knowledge/upload` 更新文档即可影响 `/chat` |
-| 主链路闭环 | RAG 不再只是 `/search` 演示，而是参与真实对话 |
-| 成本控制 | 问候、反馈、转人工、未知意图不触发 RAG，避免无效检索 |
-| 可观测 | `/chat` 响应新增 `knowledge_used`、`intent_group`、`intent_source_scores`，可判断本次识别和检索情况 |
+|收益|说明|
+|---|---|
+|降低幻觉|Agent 回复受知识库政策约束|
+|知识可更新|通过 `/knowledge/add` 或 `/knowledge/upload` 更新文档即可影响 `/chat`|
+|主链路闭环|RAG 不再只是 `/search` 演示，而是参与真实对话|
+|成本控制|问候、反馈、转人工、未知意图不触发 RAG，避免无效检索|
+|可观测|`/chat` 响应新增 `knowledge_used`、`intent_group`、`intent_source_scores`，可判断本次识别和检索情况|
 
 ---
 
@@ -231,7 +242,7 @@ MCPToolManager.search_with_rewrite("knowledge_search", 用户消息, top_k=3)
 
 ### 三层记忆
 
-```text
+```Plaintext
 ┌────────────────────────────────────────────┐
 │ 工作记忆 Redis                              │
 │ - 当前会话最近消息                           │
@@ -258,20 +269,20 @@ MCPToolManager.search_with_rewrite("knowledge_search", 用户消息, top_k=3)
 
 每次 `/chat` 回复后，系统会写入两条消息：
 
-```text
+```Plaintext
 user: 用户原始消息
 assistant: Agent 回复
 ```
 
 Redis key 格式：
 
-```text
+```Plaintext
 wm:{user_id}:{conv_id}
 ```
 
 摘要 key 格式：
 
-```text
+```Plaintext
 summary:{user_id}:{conv_id}
 ```
 
@@ -279,7 +290,7 @@ summary:{user_id}:{conv_id}
 
 当工作记忆达到 `COMPRESS_AT = 15` 条时：
 
-```text
+```Plaintext
 读取当前会话消息
     ↓
 保留最近 5 条
@@ -299,13 +310,13 @@ summary:{user_id}:{conv_id}
 
 每次 `/chat` 结束后，`api/main.py` 会异步执行：
 
-```python
+```Python
 asyncio.create_task(_memory.update_profile(req.user_id, conv_id))
 ```
 
 `update_profile()` 会取最近 10 条消息，让 LLM 提炼：
 
-```json
+```JSON
 {
   "preferences": ["喜欢简洁回答", "经常咨询退款"],
   "entities": {
@@ -321,7 +332,7 @@ asyncio.create_task(_memory.update_profile(req.user_id, conv_id))
 
 最终传给 Agent 的上下文结构类似：
 
-```text
+```Plaintext
 [会话摘要]
 用户之前咨询过退款，要求处理速度快。
 
@@ -346,16 +357,16 @@ assistant: 我来帮您确认退款进度。
 
 ### Agent 类型
 
-| Agent | 负责问题 |
-|-------|----------|
-| `GeneralAgent` | 通用咨询、问候、普通请求 |
-| `TechnicalAgent` | 登录失败、崩溃、错误码、系统配置 |
-| `BillingAgent` | 账单、退款、发票、订阅、账户相关 |
-| `ESCALATION` | 转人工/升级占位，不直接调用 LLM Agent |
+|Agent|负责问题|
+|---|---|
+|`GeneralAgent`|通用咨询、问候、普通请求|
+|`TechnicalAgent`|登录失败、崩溃、错误码、系统配置|
+|`BillingAgent`|账单、退款、发票、订阅、账户相关|
+|`ESCALATION`|转人工/升级占位，不直接调用 LLM Agent|
 
 ### 结构化路由决策
 
-```text
+```Plaintext
 请求进入 Orchestrator
     ↓
 1. 特殊路由
@@ -379,11 +390,11 @@ assistant: 我来帮您确认退款进度。
 
 `RoutingDecision` 会记录主 Agent、辅助 Agent、路由理由和主路由分数，并通过 `/chat` 返回，便于观察一次请求为什么进入单 Agent 或多 Agent。
 
-### routing_score
+### routing\_score
 
 `AgentStats.routing_score()` 由三部分组成：
 
-```text
+```Plaintext
 base_score = success_rate * 0.7 + latency_score * 0.3
 routing_score = base_score * (1 - monitor_penalty)
 ```
@@ -391,8 +402,10 @@ routing_score = base_score * (1 - monitor_penalty)
 其中：
 
 - `success_rate`：Agent 成功率。
+
 - `latency_score`：由平均延迟换算，延迟越低得分越高。
-- `monitor_penalty`：Monitor 根据在线表现写回的降权系数，范围 0 到 0.9。
+
+- `monitor_penalty`：Monitor 根据在线表现写回的降权系数，范围 0 到 0\.9。
 
 ### 自动并行协作
 
@@ -400,19 +413,19 @@ routing_score = base_score * (1 - monitor_penalty)
 
 示例：
 
-```text
+```Plaintext
 “登录报错 401，而且这个月还重复扣款了”
 ```
 
 系统会综合意图、关键词和实体打分，例如：
 
-```text
+```Plaintext
 technical=1.00, billing=0.54, general=0.10
 ```
 
 路由结果：
 
-```text
+```Plaintext
 primary_agent = technical
 supporting_agents = [billing]
 agent_types = [technical, billing]
@@ -420,12 +433,13 @@ agent_types = [technical, billing]
 
 然后把两个成功响应按主次合并返回：
 
-[technical - 主处理]
-...
+\[technical \- 主处理\]
+\.\.\.
 
-[billing - 辅助处理]
-...
-```
+\[billing \- 辅助处理\]
+\.\.\.
+
+```Plaintext
 
 `/chat` 响应会返回：
 
@@ -444,7 +458,9 @@ agent_types = [technical, billing]
 以下情况会标记 `escalated = true`：
 
 - 用户意图或紧急度触发升级。
+
 - 用户包含强紧急表达。
+
 - Agent 回复中出现“转人工”“人工客服”“无法处理”等关键词。
 
 生产环境中可在该位置对接工单系统、客服队列或告警系统。
@@ -459,7 +475,7 @@ agent_types = [technical, billing]
 
 ### 技术方案
 
-```text
+```Plaintext
 启动服务
   -> api/main.py 创建 SkillManager
   -> 从 ECHOMIND_SKILLS_DIR 扫描 SKILL.md / md / txt / json
@@ -477,7 +493,7 @@ agent_types = [technical, billing]
 
 例如通用咨询路由到 `GeneralAgent` 后，系统会调用：
 
-```text
+```Plaintext
 SkillManager.prompt_for(用户消息, "general")
 ```
 
@@ -485,34 +501,37 @@ SkillManager.prompt_for(用户消息, "general")
 
 当前内置三类 Skills：
 
-| Skill 文件 | 适用 Agent | 作用 |
-|------------|------------|------|
-| `skills/general_customer_service/SKILL.md` | `GeneralAgent` | 通用接待、信息澄清、分流、投诉和转人工 |
-| `skills/technical_support/SKILL.md` | `TechnicalAgent` | 故障排查、接口错误、部署配置、安全边界 |
-| `skills/billing_support/SKILL.md` | `BillingAgent` | 扣款、退款、发票、订阅和财务审核 |
+|Skill 文件|适用 Agent|作用|
+|---|---|---|
+|`skills/general_customer_service/SKILL.md`|`GeneralAgent`|通用接待、信息澄清、分流、投诉和转人工|
+|`skills/technical_support/SKILL.md`|`TechnicalAgent`|故障排查、接口错误、部署配置、安全边界|
+|`skills/billing_support/SKILL.md`|`BillingAgent`|扣款、退款、发票、订阅和财务审核|
 
 ### 匹配规则
 
 - `enabled=false` 的 Skill 不注入。
+
 - `agents` 限定 Agent 类型，避免账单规则注入技术 Agent。
+
 - `keywords` 命中用户消息后才注入；关键词为空时作为该 Agent 的全局规则。
+
 - 注入内容有总长度预算和单个 Skill 长度限制，避免挤占记忆和知识库上下文。
 
 ### API 入口
 
-```bash
+```Bash
 curl http://localhost:8000/skills
 curl -X POST http://localhost:8000/skills/reload
 ```
 
 ### 价值
 
-| 能力 | 效果 |
-|------|------|
-| 业务规则可配置 | 修改 Markdown 后热加载，无需重启服务 |
-| Agent 规则隔离 | 通用、技术、账单三类规范按 Agent 注入 |
-| 降低幻觉和越权 | 在 prompt 中明确核验、升级、禁止事项 |
-| 便于排障 | `/skills` 返回加载数量、文件路径、关键词和解析错误 |
+|能力|效果|
+|---|---|
+|业务规则可配置|修改 Markdown 后热加载，无需重启服务|
+|Agent 规则隔离|通用、技术、账单三类规范按 Agent 注入|
+|降低幻觉和越权|在 prompt 中明确核验、升级、禁止事项|
+|便于排障|`/skills` 返回加载数量、文件路径、关键词和解析错误|
 
 ---
 
@@ -524,7 +543,7 @@ curl -X POST http://localhost:8000/skills/reload
 
 ### 监控闭环
 
-```text
+```Plaintext
 Agent / Tool 执行请求
     ↓
 实时更新 AgentStats / ToolStats
@@ -544,18 +563,18 @@ PerformanceMonitor 每 10s 采集一次
 
 ### 告警阈值
 
-| 指标 | 阈值 | 级别 |
-|------|------|------|
-| Agent 成功率 | `< 0.90` | ERROR |
-| 工具成功率 | `< 0.95` | WARNING |
-| Agent 平均延迟 | `> 3000ms` | WARNING |
-| 工具平均延迟 | `> 5000ms` | ERROR |
+|指标|阈值|级别|
+|---|---|---|
+|Agent 成功率|`< 0.90`|ERROR|
+|工具成功率|`< 0.95`|WARNING|
+|Agent 平均延迟|`> 3000ms`|WARNING|
+|工具平均延迟|`> 5000ms`|ERROR|
 
 ### 自动降权规则
 
 Monitor 会把成功率和延迟转成 `monitor_penalty`：
 
-```text
+```Plaintext
 success_rate < 0.90 -> 增加成功率惩罚
 avg_ms > 3000       -> 增加延迟惩罚
 最终 penalty 最大 0.9
@@ -567,7 +586,7 @@ avg_ms > 3000       -> 增加延迟惩罚
 
 `GET /monitor` 会返回：
 
-```json
+```JSON
 {
   "agent_stats": {
     "technical_0": {
@@ -597,8 +616,11 @@ avg_ms > 3000       -> 增加延迟惩罚
 当前 FastAPI 应用通过 `GET /metrics` 暴露 Prometheus 指标，Docker Compose 中的 Prometheus 会抓取 `echomind:8000/metrics`。另外，如果单独设置 `PROMETHEUS_PORT`，Monitor 也可以启动独立的 Prometheus 指标端口。指标包括：
 
 - Agent 成功率
+
 - Agent 延迟
+
 - 工具成功率
+
 - 总请求数
 
 ---
@@ -611,7 +633,8 @@ avg_ms > 3000       -> 增加延迟惩罚
 
 ### 评测内容
 
-```text
+```Plaintext
+
 1. 意图识别评测
    标注用例 -> IntentRecognizer -> Accuracy / Macro-F1
 
@@ -629,24 +652,24 @@ avg_ms > 3000       -> 增加延迟惩罚
    根据低分指标输出具体优化方向
 ```
 
-### LLM-as-Judge 评分维度
+### LLM\-as\-Judge 评分维度
 
-| 维度 | 含义 | 分数 |
-|------|------|------|
-| `relevance` | 是否直接回应用户问题 | 0-1 |
-| `accuracy` | 信息是否准确 | 0-1 |
-| `completeness` | 是否完整解决需求 | 0-1 |
-| `helpfulness` | 用户能否据此行动 | 0-1 |
+|维度|含义|分数|
+|---|---|---|
+|`relevance`|是否直接回应用户问题|0\-1|
+|`accuracy`|信息是否准确|0\-1|
+|`completeness`|是否完整解决需求|0\-1|
+|`helpfulness`|用户能否据此行动|0\-1|
 
 ### API 使用
 
-```bash
+```Bash
 curl -X POST http://localhost:8000/eval/run
 ```
 
 响应包含整体通过率、平均分、回归项、建议和逐条结果：
 
-```json
+```JSON
 {
   "pass_rate": 0.83,
   "total": 5,
@@ -679,7 +702,7 @@ curl -X POST http://localhost:8000/eval/run
 
 `/eval/run` 不传 body 时运行内置用例；传入 body 时可以覆盖意图识别用例和对话用例：
 
-```json
+```JSON
 {
   "intent_cases": [
     {"message": "应用一直报错", "expected_intent": "technical_crash"}
@@ -699,11 +722,11 @@ curl -X POST http://localhost:8000/eval/run
 
 EchoMind 中 ChromaDB 不是单一用途，而是同时承担 RAG 知识库和长期记忆。
 
-| Collection | 代码位置 | 写入来源 | 查询用途 |
-|------------|----------|----------|----------|
-| `knowledge_base` | `mcp/knowledge_base.py` | 默认文档、`/knowledge/add`、`/knowledge/upload` | `/search` 检索业务知识 |
-| `episodic` | `memory/conversation_memory.py` | 工作记忆压缩后的摘要 | 下一轮对话检索相关历史 |
-| `user_profile` | `memory/conversation_memory.py` | 每次 `/chat` 后异步提炼 | 拼入 Agent 背景信息，支持个性化 |
+|Collection|代码位置|写入来源|查询用途|
+|---|---|---|---|
+|`knowledge_base`|`mcp/knowledge_base.py`|默认文档、`/knowledge/add`、`/knowledge/upload`|`/search` 检索业务知识|
+|`episodic`|`memory/conversation_memory.py`|工作记忆压缩后的摘要|下一轮对话检索相关历史|
+|`user_profile`|`memory/conversation_memory.py`|每次 `/chat` 后异步提炼|拼入 Agent 背景信息，支持个性化|
 
 查看方式见 `wiki/完整使用指南.md` 中 “在 Docker 中查看 ChromaDB 内容” 部分。
 
@@ -711,7 +734,7 @@ EchoMind 中 ChromaDB 不是单一用途，而是同时承担 RAG 知识库和�
 
 ## 模块协作关系
 
-```text
+```Plaintext
 api/main.py
   ├── /chat
   │     ├── MemoryManager.get_context()
@@ -745,7 +768,7 @@ api/main.py
 
 端到端数据流：
 
-```text
+```Plaintext
 请求进入
   -> 读取记忆
   -> 识别意图
@@ -757,3 +780,6 @@ api/main.py
   -> Monitor 采集表现
   -> 下一次路由使用更新后的 routing_score
 ```
+
+
+
